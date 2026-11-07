@@ -6,13 +6,21 @@ on:
   pull_request:
     branches: [main]
 
-# Default to read-only access for the automatic token (least privilege)
+# Read-only token by default (least privilege); jobs ask for more only if needed
 permissions:
   contents: read
 
+# If a newer commit arrives, cancel the older run for the same branch
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Code quality: lint, tests with coverage, dependency vulnerability audit
+  # ---------------------------------------------------------------------------
   test:
-    name: Run backend tests
+    name: Lint, test and audit backend
     runs-on: ubuntu-latest
     steps:
       - name: Check out code
@@ -25,23 +33,70 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements.txt
 
-      - name: Install dependencies
+      - name: Install dependencies and CI tools
         working-directory: backend
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt pytest-cov ruff pip-audit
 
-      - name: Run pytest
+      - name: Lint with ruff (syntax errors and unused or undefined names)
         working-directory: backend
-        run: python -m pytest
+        run: ruff check app --select E9,F
 
+      - name: Run tests with coverage
+        working-directory: backend
+        run: |
+          python -m pytest --cov=app --cov-report=term-missing
+          echo "### Test coverage" >> "$GITHUB_STEP_SUMMARY"
+          python -m coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
+
+      # Advisory for now: reports known-vulnerable packages without failing the run
+      - name: Audit Python dependencies for known vulnerabilities
+        working-directory: backend
+        continue-on-error: true
+        run: pip-audit -r requirements.txt
+
+  # ---------------------------------------------------------------------------
+  # 2. Integration check: do the built images actually work together?
+  # ---------------------------------------------------------------------------
+  smoke-test:
+    name: Start the stack and smoke test
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Create env file from the example
+        run: cp .env.example .env
+
+      - name: Build and start all containers (waits until healthy)
+        run: docker compose up -d --build --wait --wait-timeout 180
+
+      - name: Smoke tests through the web tier
+        run: |
+          curl -fsS http://localhost:8080/healthz
+          curl -fsS http://localhost:8080/health
+          curl -fsS http://localhost:8080/ | grep -qi "cloudops"
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  # ---------------------------------------------------------------------------
+  # 3. Publish: build both images and push them to GitHub Container Registry
+  # ---------------------------------------------------------------------------
   build-and-push:
     name: Build and push ${{ matrix.name }} image
-    needs: test
-    # Only publish images from main, never from pull requests
+    needs: [test, smoke-test]
+    # Only publish from main, never from pull requests
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write   # needed to push to GHCR
+      packages: write
     strategy:
       matrix:
         include:
@@ -53,7 +108,6 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v4
 
-      # Image names must be lowercase, but GitHub usernames can contain capitals
       - name: Compute lowercase image name
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/cloudops-${{ matrix.name }}" >> "$GITHUB_ENV"
 
@@ -83,7 +137,16 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          provenance: true   # signed record of how and where the image was built
+          sbom: true         # software bill of materials stored with the image
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Record pushed tags in the run summary
+        run: |
+          echo "### Pushed ${{ matrix.name }} image" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
   # A deploy job will be added here once the AWS infrastructure exists.
