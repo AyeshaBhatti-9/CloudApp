@@ -1,0 +1,39 @@
+server {
+    listen 80;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Resolve the backend name at request time (not only at startup), so a
+    # load-balancer DNS name whose IPs change keeps working.
+    #   docker-compose: 127.0.0.11   |   AWS VPC DNS: <VPC base IP + 2> or 169.254.169.253
+    resolver ${DNS_RESOLVER} valid=10s ipv6=off;
+    set $api_upstream "${API_UPSTREAM}";   # no trailing slash, e.g. http://internal-alb-123.elb.amazonaws.com
+
+    # Lightweight health check for the web tier's own load balancer target group
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    # Reverse proxy to the application tier
+    location /api/ {
+        proxy_pass $api_upstream;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location = /health {
+        proxy_pass $api_upstream;
+        proxy_set_header Host $host;
+    }
+
+    # Static frontend
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
