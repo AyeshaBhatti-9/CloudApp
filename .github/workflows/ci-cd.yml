@@ -149,4 +149,51 @@ jobs:
           echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
-  # A deploy job will be added here once the AWS infrastructure exists.
+  # ---------------------------------------------------------------------------
+  # 4. Deploy: roll the new images out to AWS with an Auto Scaling Instance Refresh
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to AWS (instance refresh)
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # lets the job request an OIDC token from GitHub
+      contents: read
+    env:
+      AWS_REGION: eu-north-1
+    steps:
+      - name: Authenticate to AWS with OIDC (no stored access keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Roll out app tier, then web tier
+        run: |
+          set -euo pipefail
+          for ASG in cloudops-app-asg cloudops-web-asg; do
+            echo "Starting instance refresh for $ASG"
+            REFRESH_ID=$(aws autoscaling start-instance-refresh \
+              --auto-scaling-group-name "$ASG" \
+              --preferences '{"MinHealthyPercentage":100,"MaxHealthyPercentage":200,"InstanceWarmup":300}' \
+              --query InstanceRefreshId --output text)
+
+            for i in $(seq 1 60); do
+              STATUS=$(aws autoscaling describe-instance-refreshes \
+                --auto-scaling-group-name "$ASG" \
+                --instance-refresh-ids "$REFRESH_ID" \
+                --query 'InstanceRefreshes[0].Status' --output text)
+              echo "$ASG refresh $REFRESH_ID: $STATUS"
+              case "$STATUS" in
+                Successful) break ;;
+                Failed|Cancelled|Cancelling) echo "Refresh did not succeed"; exit 1 ;;
+              esac
+              sleep 30
+            done
+
+            if [ "$STATUS" != "Successful" ]; then
+              echo "Timed out waiting for $ASG"; exit 1
+            fi
+            echo "- $ASG: $STATUS ($REFRESH_ID)" >> "$GITHUB_STEP_SUMMARY"
+          done
