@@ -166,7 +166,7 @@ jobs:
       - name: Authenticate to AWS with OIDC (no stored access keys)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-to-assume: arn:aws:iam::023065501030:role/cloudops-github-deploy-role
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Roll out app tier, then web tier
