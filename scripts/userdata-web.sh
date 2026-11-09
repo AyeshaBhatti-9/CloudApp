@@ -38,6 +38,10 @@ docker rm -f cloudops-web 2>/dev/null || true
 docker run -d \
   --name cloudops-web \
   --restart unless-stopped \
+  --log-driver awslogs \
+  --log-opt awslogs-region=eu-north-1 \
+  --log-opt awslogs-group=/cloudops/web \
+  --log-opt awslogs-stream="$(hostname)" \
   -p 80:80 \
   -e API_UPSTREAM="http://${API_DNS}" \
   -e DNS_RESOLVER=10.0.0.2 \

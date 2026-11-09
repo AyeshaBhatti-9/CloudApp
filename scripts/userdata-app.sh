@@ -51,6 +51,10 @@ docker rm -f cloudops-api 2>/dev/null || true
 docker run -d \
   --name cloudops-api \
   --restart unless-stopped \
+  --log-driver awslogs \
+  --log-opt awslogs-region=eu-north-1 \
+  --log-opt awslogs-group=/cloudops/app \
+  --log-opt awslogs-stream="$(hostname)" \
   -p 8000:8000 \
   --env-file /etc/cloudops/api.env \
   "$IMAGE"
